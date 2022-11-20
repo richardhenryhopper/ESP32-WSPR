@@ -49,13 +49,13 @@ SOFTWARE.
 #include "esp_err.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
-#include "esp_event_loop.h"
 #include "esp_system.h"
 #include "esp_spi_flash.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_attr.h"
 #include "esp_task_wdt.h"
+#include "driver/gpio.h"
 
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -69,9 +69,12 @@ SOFTWARE.
 #include "si5351.h"
 #include "wspr.h"
 
+#include "wifi_manager.h"
+
 static void periodic_timer_callback(void* arg);
 
 static const char *TAG = "main";
+
 
 /**
  * Pin assignment:
@@ -82,13 +85,17 @@ static const char *TAG = "main";
  */
 
 #define I2C_EXAMPLE_MASTER_SCL_IO	19
-#define I2C_EXAMPLE_MASTER_SDA_IO	18
+#define I2C_EXAMPLE_MASTER_SDA_IO   18
+
+#define TX_PIN  GPIO_NUM_32
 
 /*
  * Set the WiFi info
  */
-#define EXAMPLE_WIFI_SSID "Pelosi2019"
-#define EXAMPLE_WIFI_PASS "ImpeachTheBums"
+//#define EXAMPLE_WIFI_SSID "Pelosi2019"
+//#define EXAMPLE_WIFI_PASS "ImpeachTheBums"
+#define EXAMPLE_WIFI_SSID "Makespace"
+#define EXAMPLE_WIFI_PASS "getexc1tedandmaketh1ngs"
 
 /*
  * FreeRTOS event group to signal when we are connected & ready to
@@ -108,9 +115,16 @@ const int CONNECTED_BIT = BIT0;
 #define TIME_RETRY_COUNT    10
 
 static void obtain_time(void);
+static void test(void);
 static void initialize_sntp(void);
 static void initialise_wifi(void);
-static esp_err_t event_handler(void *ctx, system_event_t *event);
+static void cb_connection_lost(void *pvParameter);
+static void cb_connection_ok(void *pvParameter);
+
+/* Event source task related definitions */
+ESP_EVENT_DEFINE_BASE(TASK_EVENTS);
+
+esp_event_loop_handle_t event_loop_handle;
 
 /*
  *
@@ -123,13 +137,14 @@ obtain_time(void)
     struct tm timeinfo = { 0 };
 
     ESP_ERROR_CHECK( nvs_flash_init() );
-    initialise_wifi();
+    //initialise_wifi();
 
     /*
      * Wait for WiFi connected event
      */
     xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
-                        false, true, portMAX_DELAY);
+                      false, true, portMAX_DELAY);
+                        
     initialize_sntp();
 
     // wait for time to be set
@@ -157,55 +172,31 @@ initialize_sntp(void)
     sntp_init();
 }
 
-/*
- *
+
+/**
+ * @brief this is an exemple of a callback that you can setup in your own app to get notified of wifi manager event.
  */
-static void
-initialise_wifi(void)
-{
-    tcpip_adapter_init();
-    wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-    ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = EXAMPLE_WIFI_SSID,
-            .password = EXAMPLE_WIFI_PASS,
-        },
-    };
-    ESP_LOGI(TAG, "Setting WiFi configuration SSID %s...", wifi_config.sta.ssid);
-    ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
-    ESP_ERROR_CHECK( esp_wifi_start() );
+void cb_connection_ok(void *pvParameter){
+	ip_event_got_ip_t* param = (ip_event_got_ip_t*)pvParameter;
+
+	/* transform IP to human readable string */
+	char str_ip[16];
+	esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
+
+	ESP_LOGI(TAG, "I have a connection and my IP is %s!", str_ip);
+    xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
 }
 
-/*
- *
- */
-static esp_err_t
-event_handler(void *ctx, system_event_t *event)
-{
-    switch(event->event_id) {
-    case SYSTEM_EVENT_STA_START:
-        esp_wifi_connect();
-        break;
-    case SYSTEM_EVENT_STA_GOT_IP:
-        xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-        break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
-        /* This is a workaround as ESP32 WiFi libs don't currently
-           auto-reassociate. */
-        esp_wifi_connect();
-        xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
-        break;
-    default:
-        break;
-    }
-    return ESP_OK;
-}
+void cb_connection_lost(void *pvParameter){
+	//ip_event_got_ip_t* param = (ip_event_got_ip_t*)pvParameter;
 
+	/* transform IP to human readable string */
+	//char str_ip[16];
+	//esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
+
+	ESP_LOGI(TAG, "Connection lost");
+    xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+}
 
 /**
  * @brief i2c master initialization
@@ -307,9 +298,9 @@ si5351_start(enum si5351_clock clk, int64_t freq)
 /*
  *
  */
-static uint64_t txFreq = (14095600 + 1500 - 50) * 100;
+//static uint64_t txFreq = (14095600 + 1500 - 50) * 100;
 //static uint64_t txFreq = (10138700 + 1500 - 4) * 100;
-//static uint64_t txFreq = (7038600 + 1500 - 4) * 100;
+static uint64_t txFreq = (7038600 + 1500 + 58) * 100;
 static const uint64_t txStep = (uint64_t)((12000 * 100) / 8192);
 
 static uint8_t syms[162];
@@ -342,11 +333,13 @@ wsprTransmitter(void *arg)
 
     /* init I2C port 0 */
     i2c_master_init();
+    /* init GPIO */
+    gpio_set_direction(TX_PIN, GPIO_MODE_OUTPUT);
 
-    si5351_init(SI5351_CRYSTAL_LOAD_10PF, 27000000, 175310);
+    si5351_init(SI5351_CRYSTAL_LOAD_8PF, 0, 31360); 
     si5351_start(SI5351_CLK0, txFreq);
-
-    (void) get_wspr_channel_symbols("<K6JQ> CM88WE 10", syms);
+    
+    (void) get_wspr_channel_symbols("M0RHC JO02BE 33", syms);
 
     /* send frame */
     while (true) {
@@ -368,6 +361,7 @@ wsprTransmitter(void *arg)
         /* start first baud */
         si5351_set_freq(syms[txIndex++] * txStep + txFreq, SI5351_CLK0);
         si5351_output_enable(SI5351_CLK0, 1);
+        gpio_set_level(TX_PIN, 1);
 
         /*  start baud timer */
         ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer,
@@ -382,6 +376,7 @@ wsprTransmitter(void *arg)
 
         /* turn off the TX */
         si5351_output_enable(SI5351_CLK0, 0);
+        gpio_set_level(TX_PIN, 0);
 
         /* stop the baud timer */
         ESP_ERROR_CHECK(esp_timer_stop(periodic_timer));
@@ -392,8 +387,27 @@ wsprTransmitter(void *arg)
      */
 }
 
+static void
+test(void)
+{
+    ESP_LOGI(TAG, "Wait");
+    //xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
+      //                  false, true, portMAX_DELAY);
+    ESP_LOGI(TAG, "Connected");
+}
+
 void app_main(void)
 {
+    wifi_event_group = xEventGroupCreate();
+    /* start the wifi manager */
+    wifi_manager_start();
+
+    /* register a callbacks */
+	wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
+    wifi_manager_set_callback(WM_EVENT_STA_DISCONNECTED, &cb_connection_lost);
+
+    //test();
+
     time_t now;
     struct tm timeinfo;
 
